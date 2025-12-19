@@ -1,5 +1,6 @@
 import os
 import subprocess
+import base64
 from celery import Celery
 
 # Redis URL
@@ -28,8 +29,26 @@ def compile_latex_task(project_id, files_dict, main_file):
         file_path = os.path.join(build_dir, filename)
         # Create subdirectories if needed (e.g., images/)
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(content)
+        
+        # Check if content is base64 encoded (images)
+        if content.startswith('data:image'):
+            # Extract base64 data
+            try:
+                # Format: data:image/png;base64,<base64data>
+                base64_data = content.split(',', 1)[1]
+                image_data = base64.b64decode(base64_data)
+                # Write binary data for images
+                with open(file_path, "wb") as f:
+                    f.write(image_data)
+            except Exception as e:
+                print(f"Error decoding image {filename}: {e}")
+                # Fallback: write as text
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+        else:
+            # Regular text file (LaTeX, etc.)
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(content)
 
     # 3. Compile LaTeX (use main file)
     try:

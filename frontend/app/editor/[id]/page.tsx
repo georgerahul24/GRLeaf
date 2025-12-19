@@ -307,7 +307,9 @@ export default function Editor() {
     if (!confirm(`Delete ${filename}?`)) return;
     
     try {
-      await axios.delete(`${API_URL}/projects/${id}/files/${filename}`, {
+      // Properly encode filename for URL with special characters
+      const encodedFilename = encodeURIComponent(filename);
+      await axios.delete(`${API_URL}/projects/${id}/files/${encodedFilename}`, {
         headers: authService.getAuthHeaders(),
       });
       
