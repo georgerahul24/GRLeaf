@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+motor
+beanie
+redis
+celery
+python-multipart
+jinja2
+websockets
+aioredis

@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  # 1. Database (Metadata)
+  mongo:
+    image: mongo:latest
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  # 2. Cache & Pub/Sub (Realtime)
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+
+  # 3. Backend API (FastAPI)
+  backend:
+    build: ./backend
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGODB_URL=mongodb://mongo:27017
+      - REDIS_URL=redis://redis:6379
+      - BROKER_URL=redis://redis:6379/0
+    depends_on:
+      - mongo
+      - redis
+
+  # 4. Compilation Worker (Celery + TeX)
+  worker:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    command: celery -A worker.celery_app worker --loglevel=info
+    volumes:
+      - ./backend:/app
+      - latex_builds:/builds
+    environment:
+      - BROKER_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+
+  # 5. Frontend (Next.js)
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8000
+    depends_on:
+      - backend
+
+volumes:
+  mongo_data:
+  latex_builds:
+  
+# Note: In a real production setup, we would run a separate Docker container 
+# inside the worker for "Sandboxing", but for this MVP we run latex directly in the worker container.
