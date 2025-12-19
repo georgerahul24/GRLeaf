@@ -33,9 +33,16 @@ import { authService } from "@/lib/auth";
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 // LaTeX autocomplete suggestions
-const latexCompletions = (context: any) => {
+const latexCompletions = (context: any, projectFiles: FileItem[] = []) => {
   const word = context.matchBefore(/\\[\w]*/);
   if (!word || (word.from == word.to && !context.explicit)) return null;
+
+  // Add file paths for \input{} and \include{}
+  const filePathOptions = projectFiles.map(file => ({
+    label: `\\input{${file.name.replace('.tex', '')}}`,
+    detail: `Include ${file.name}`,
+    apply: `\\input{${file.name.replace('.tex', '')}}`
+  }));
 
   const options = [
     // Document structure
@@ -97,11 +104,15 @@ const latexCompletions = (context: any) => {
     { label: "\\usepackage{graphicx}", detail: "Graphics package", apply: "\\usepackage{graphicx}" },
     { label: "\\usepackage{amsmath}", detail: "AMS Math package", apply: "\\usepackage{amsmath}" },
     { label: "\\usepackage{hyperref}", detail: "Hyperref package", apply: "\\usepackage{hyperref}" },
+    
+    // File inclusion
+    { label: "\\input{}", detail: "Include another LaTeX file" },
+    { label: "\\include{}", detail: "Include file (with page break)" },
   ];
 
   return {
     from: word.from,
-    options: options.filter(opt => opt.label.toLowerCase().startsWith(word.text.toLowerCase())),
+    options: [...options, ...filePathOptions].filter(opt => opt.label.toLowerCase().startsWith(word.text.toLowerCase())),
   };
 };
 
@@ -125,8 +136,13 @@ export default function Editor() {
   const [compiling, setCompiling] = useState(false);
   const [connected, setConnected] = useState(false);
   const [compileStatus, setCompileStatus] = useState<"idle" | "success" | "error">("idle");
+  const [errorLog, setErrorLog] = useState<string>("");
+  const [activeTab, setActiveTab] = useState<"editor" | "errors">("editor");
   
   const [showNewFileModal, setShowNewFileModal] = useState(false);
+  const [showNewFolderModal, setShowNewFolderModal] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [showToolbar, setShowToolbar] = useState(true);
   const [newFileName, setNewFileName] = useState("");
   const [showShareModal, setShowShareModal] = useState(false);
   const [shareEmail, setShareEmail] = useState("");
@@ -210,13 +226,25 @@ export default function Editor() {
    * ==============================
    */
   const setupWebSocket = (filename: string) => {
-    if (ws) ws.close();
+    if (ws) {
+      ws.close();
+      setConnected(false);
+    }
 
     const socket = new WebSocket(`ws://localhost:8000/ws/${id}/${filename}`);
 
-    socket.onopen = () => setConnected(true);
-    socket.onclose = () => setConnected(false);
-    socket.onerror = () => setConnected(false);
+    socket.onopen = () => {
+      console.log('WebSocket connected');
+      setConnected(true);
+    };
+    socket.onclose = () => {
+      console.log('WebSocket closed');
+      setConnected(false);
+    };
+    socket.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      setConnected(false);
+    };
 
     socket.onmessage = (event) => {
       setCode(event.data);
@@ -300,6 +328,65 @@ export default function Editor() {
     }
   };
 
+  const createFolder = async () => {
+    if (!newFolderName.trim()) return;
+    
+    // Create a folder by creating a .gitkeep file in it
+    const folderPath = newFolderName.endsWith('/') ? newFolderName : `${newFolderName}/`;
+    const filename = `${folderPath}.gitkeep`;
+    
+    try {
+      await axios.post(
+        `${API_URL}/projects/${id}/files`,
+        { name: filename, content: "" },
+        { headers: { "Content-Type": "application/json", ...authService.getAuthHeaders() } }
+      );
+      
+      await loadProject();
+      setShowNewFolderModal(false);
+      setNewFolderName("");
+    } catch (error: any) {
+      alert(error.response?.data?.detail || "Failed to create folder");
+    }
+  };
+
+  const handleImageDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    const files = Array.from(e.dataTransfer.files);
+    const imageFiles = files.filter(f => f.type.startsWith('image/'));
+    
+    for (const imageFile of imageFiles) {
+      // Read file as base64
+      const reader = new FileReader();
+      reader.onload = async (event) => {
+        const base64 = event.target?.result as string;
+        const filename = `images/${imageFile.name}`;
+        
+        try {
+          // Create the image file in the project
+          await axios.post(
+            `${API_URL}/projects/${id}/files`,
+            { name: filename, content: base64 },
+            { headers: { "Content-Type": "application/json", ...authService.getAuthHeaders() } }
+          );
+          
+          // Insert LaTeX code for the image
+          const imageCode = `\n\\begin{figure}[h]\n\\centering\n\\includegraphics[width=0.8\\textwidth]{${filename}}\n\\caption{${imageFile.name}}\n\\end{figure}\n`;
+          setCode(code + imageCode);
+          
+          await loadProject();
+        } catch (error) {
+          console.error("Failed to upload image:", error);
+        }
+      };
+      reader.readAsDataURL(imageFile);
+    }
+  };
+
+  const insertLatexCommand = (command: string) => {
+    setCode(code + command);
+  };
+
   /**
    * ==============================
    * 4. EDITOR
@@ -365,13 +452,15 @@ export default function Editor() {
           clearInterval(interval);
           setCompiling(false);
           setCompileStatus("error");
-          alert(statusRes.data.log);
+          setErrorLog(statusRes.data.log || "Compilation failed");
+          setActiveTab("errors");
         }
       }, 1000);
-    } catch (error) {
+    } catch (error: any) {
       setCompiling(false);
       setCompileStatus("error");
-      alert("Compilation request failed");
+      setErrorLog(error.response?.data?.detail || "Compilation request failed");
+      setActiveTab("errors");
     }
   };
 
@@ -543,28 +632,7 @@ export default function Editor() {
           </div>
         </div>
 
-        {/* Compile Status */}
-        {compileStatus !== "idle" && (
-          <div
-            className={`px-6 py-2 text-sm flex items-center gap-2 ${
-              compileStatus === "success"
-                ? "bg-green-50 text-green-800"
-                : "bg-red-50 text-red-800"
-            }`}
-          >
-            {compileStatus === "success" ? (
-              <>
-                <CheckCircle className="w-4 h-4" />
-                Compilation successful - PDF ready for download
-              </>
-            ) : (
-              <>
-                <AlertCircle className="w-4 h-4" />
-                Compilation failed
-              </>
-            )}
-          </div>
-        )}
+        {/* No more compile status banner - errors go to error tab */}
       </header>
 
       {/* ================= MAIN ================= */}
@@ -574,90 +642,301 @@ export default function Editor() {
         <div className="w-64 bg-white border-r flex flex-col">
           <div className="px-4 py-3 border-b">
             <div className="flex justify-between items-center mb-2">
-              <span className="text-sm font-semibold text-gray-700">Files</span>
-              <button
-                onClick={() => setShowNewFileModal(true)}
-                className="p-1.5 hover:bg-gray-100 rounded transition-colors"
-                title="New file"
-              >
-                <Plus className="w-4 h-4" />
-              </button>
+              <span className="text-sm font-semibold text-gray-700">Files & Folders</span>
+              <div className="flex gap-1">
+                <button
+                  onClick={() => setShowNewFolderModal(true)}
+                  className="p-1.5 hover:bg-gray-100 rounded transition-colors"
+                  title="New folder"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+                  </svg>
+                </button>
+                <button
+                  onClick={() => setShowNewFileModal(true)}
+                  className="p-1.5 hover:bg-gray-100 rounded transition-colors"
+                  title="New file"
+                >
+                  <Plus className="w-4 h-4" />
+                </button>
+              </div>
             </div>
             <p className="text-xs text-gray-500">
-              Set one file as <span className="font-semibold">MAIN</span> to compile. Use <code className="bg-gray-100 px-1 rounded">\input{"{filename}"}</code> to include others.
+              Set one file as <span className="font-semibold">MAIN</span> to compile. Use <code className="bg-gray-100 px-1 rounded">\input{"{filename}"}</code> to include others. Drag & drop images here.
             </p>
           </div>
 
           <div className="flex-1 overflow-y-auto">
-            {files.map((file) => (
-              <div
-                key={file.name}
-                className={`group flex items-center justify-between px-4 py-2.5 cursor-pointer hover:bg-gray-50 transition-colors ${
-                  currentFile === file.name ? "bg-green-50 border-l-4 border-green-600" : ""
-                }`}
-                onClick={() => switchFile(file.name)}
-              >
-                <div className="flex items-center gap-2 flex-1 min-w-0">
-                  <File className="w-4 h-4 text-gray-500 flex-shrink-0" />
-                  <span className="text-sm text-gray-700 truncate">{file.name}</span>
-                  {file.is_main && (
-                    <span className="text-xs bg-green-600 text-white px-2 py-0.5 rounded font-medium flex-shrink-0">
-                      MAIN
-                    </span>
-                  )}
-                </div>
-                
-                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                  {!file.is_main && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setMainFile(file.name);
-                      }}
-                      className="px-2 py-1 text-xs bg-green-100 hover:bg-green-200 text-green-700 rounded transition-colors font-medium"
-                      title="Set as main compilation file"
+            {(() => {
+              // Group files by folder
+              const fileTree: any = {};
+              files.forEach(file => {
+                const parts = file.name.split('/');
+                if (parts.length === 1) {
+                  // Root level file
+                  if (!fileTree['__root__']) fileTree['__root__'] = [];
+                  fileTree['__root__'].push(file);
+                } else {
+                  // File in folder
+                  const folder = parts.slice(0, -1).join('/');
+                  if (!fileTree[folder]) fileTree[folder] = [];
+                  fileTree[folder].push(file);
+                }
+              });
+
+              return (
+                <>
+                  {/* Root files */}
+                  {fileTree['__root__']?.map((file: FileItem) => (
+                    <div
+                      key={file.name}
+                      className={`group flex items-center justify-between px-4 py-2.5 cursor-pointer hover:bg-gray-50 transition-colors ${
+                        currentFile === file.name ? "bg-green-50 border-l-4 border-green-600" : ""
+                      }`}
+                      onClick={() => switchFile(file.name)}
                     >
-                      Set Main
-                    </button>
-                  )}
-                  {files.length > 1 && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        deleteFile(file.name);
-                      }}
-                      className="p-1 hover:bg-red-100 rounded"
-                      title="Delete file"
-                    >
-                      <X className="w-3 h-3 text-red-600" />
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))}
+                      <div className="flex items-center gap-2 flex-1 min-w-0">
+                        <File className="w-4 h-4 text-gray-500 flex-shrink-0" />
+                        <span className="text-sm text-gray-700 truncate">{file.name}</span>
+                        {file.is_main && (
+                          <span className="text-xs bg-green-600 text-white px-2 py-0.5 rounded font-medium flex-shrink-0">
+                            MAIN
+                          </span>
+                        )}
+                      </div>
+                      
+                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        {!file.is_main && file.name.endsWith('.tex') && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setMainFile(file.name);
+                            }}
+                            className="px-2 py-1 text-xs bg-green-100 hover:bg-green-200 text-green-700 rounded transition-colors font-medium"
+                            title="Set as main compilation file"
+                          >
+                            Set Main
+                          </button>
+                        )}
+                        {files.length > 1 && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deleteFile(file.name);
+                            }}
+                            className="p-1 hover:bg-red-100 rounded"
+                            title="Delete file"
+                          >
+                            <X className="w-3 h-3 text-red-600" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  
+                  {/* Folders */}
+                  {Object.keys(fileTree).filter(k => k !== '__root__').sort().map(folder => (
+                    <div key={folder} className="mt-2">
+                      <div className="px-4 py-1.5 bg-gray-50 border-t border-b border-gray-200">
+                        <div className="flex items-center gap-2">
+                          <svg className="w-4 h-4 text-yellow-600" fill="currentColor" viewBox="0 0 20 20">
+                            <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+                          </svg>
+                          <span className="text-xs font-semibold text-gray-700">{folder}</span>
+                        </div>
+                      </div>
+                      {fileTree[folder].map((file: FileItem) => (
+                        <div
+                          key={file.name}
+                          className={`group flex items-center justify-between pl-8 pr-4 py-2 cursor-pointer hover:bg-gray-50 transition-colors ${
+                            currentFile === file.name ? "bg-green-50 border-l-4 border-green-600" : ""
+                          }`}
+                          onClick={() => switchFile(file.name)}
+                        >
+                          <div className="flex items-center gap-2 flex-1 min-w-0">
+                            <File className="w-4 h-4 text-gray-500 flex-shrink-0" />
+                            <span className="text-sm text-gray-700 truncate">{file.name.split('/').pop()}</span>
+                            {file.is_main && (
+                              <span className="text-xs bg-green-600 text-white px-2 py-0.5 rounded font-medium flex-shrink-0">
+                                MAIN
+                              </span>
+                            )}
+                          </div>
+                          
+                          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                            {!file.is_main && file.name.endsWith('.tex') && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setMainFile(file.name);
+                                }}
+                                className="px-2 py-1 text-xs bg-green-100 hover:bg-green-200 text-green-700 rounded transition-colors font-medium"
+                                title="Set as main compilation file"
+                              >
+                                Set Main
+                              </button>
+                            )}
+                            {files.length > 1 && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  deleteFile(file.name);
+                                }}
+                                className="p-1 hover:bg-red-100 rounded"
+                                title="Delete file"
+                              >
+                                <X className="w-3 h-3 text-red-600" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </>
+              );
+            })()}
           </div>
         </div>
         )}
 
         {/* ===== CODE EDITOR ===== */}
         {viewMode !== "pdf" && (
-        <div className={`bg-white flex flex-col ${viewMode === "split" ? "flex-1" : "w-full"}`}>
-          <div className="px-4 py-2 border-b text-sm font-semibold bg-gray-50 flex justify-between items-center">
-            <span>{currentFile}</span>
+        <div className={`bg-white flex flex-col ${viewMode === "split" ? "flex-1" : "w-full"} relative`}>
+          <div className="px-4 py-2 border-b bg-gray-50 flex justify-between items-center">
+            <div className="flex gap-4">
+              <button
+                onClick={() => setActiveTab("editor")}
+                className={`text-sm font-semibold px-3 py-1 rounded transition-colors ${
+                  activeTab === "editor" ? "bg-white shadow text-green-600" : "text-gray-600 hover:text-gray-800"
+                }`}
+              >
+                {currentFile}
+              </button>
+              <button
+                onClick={() => setActiveTab("errors")}
+                className={`text-sm font-semibold px-3 py-1 rounded transition-colors flex items-center gap-2 ${
+                  activeTab === "errors" ? "bg-white shadow text-green-600" : "text-gray-600 hover:text-gray-800"
+                }`}
+              >
+                Errors & Logs
+                {compileStatus === "error" && (
+                  <span className="w-2 h-2 bg-red-500 rounded-full"></span>
+                )}
+              </button>
+            </div>
             <span className="text-xs text-gray-500">Press Ctrl+S to save and compile</span>
           </div>
 
           <div className="flex-1 overflow-hidden">
-            <CodeMirror
-              value={code}
-              height="100%"
-              extensions={[
-                StreamLanguage.define(stex),
-                autocompletion({ override: [latexCompletions] }),
-              ]}
-              onChange={onChange}
-              className="h-full text-base"
-            />
+            {activeTab === "editor" ? (
+              <>
+                <CodeMirror
+                  value={code}
+                  height="100%"
+                  extensions={[
+                    StreamLanguage.define(stex),
+                    autocompletion({ override: [(ctx) => latexCompletions(ctx, files)] }),
+                  ]}
+                  onChange={onChange}
+                  onDrop={handleImageDrop}
+                  className="h-full text-base"
+                />
+                
+                {/* Floating Toolbar */}
+                {showToolbar && (
+                  <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 bg-white shadow-xl rounded-lg border border-gray-200 p-2 flex items-center gap-1 z-10">
+                    <button
+                      onClick={() => insertLatexCommand("\\textbf{}")}
+                      className="p-2 hover:bg-gray-100 rounded transition-colors"
+                      title="Bold"
+                    >
+                      <strong className="text-sm">B</strong>
+                    </button>
+                    <button
+                      onClick={() => insertLatexCommand("\\textit{}")}
+                      className="p-2 hover:bg-gray-100 rounded transition-colors"
+                      title="Italic"
+                    >
+                      <em className="text-sm">I</em>
+                    </button>
+                    <button
+                      onClick={() => insertLatexCommand("\\underline{}")}
+                      className="p-2 hover:bg-gray-100 rounded transition-colors"
+                      title="Underline"
+                    >
+                      <span className="text-sm underline">U</span>
+                    </button>
+                    <div className="w-px h-6 bg-gray-300 mx-1"></div>
+                    <button
+                      onClick={() => insertLatexCommand("\\begin{itemize}\\n\\item \\n\\end{itemize}")}
+                      className="p-2 hover:bg-gray-100 rounded transition-colors"
+                      title="Bullet list"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                      </svg>
+                    </button>
+                    <button
+                      onClick={() => insertLatexCommand("\\begin{enumerate}\\n\\item \\n\\end{enumerate}")}
+                      className="p-2 hover:bg-gray-100 rounded transition-colors"
+                      title="Numbered list"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                      </svg>
+                    </button>
+                    <div className="w-px h-6 bg-gray-300 mx-1"></div>
+                    <button
+                      onClick={() => insertLatexCommand("\\begin{figure}[h]\\n\\centering\\n\\includegraphics[width=0.8\\textwidth]{}\\n\\caption{}\\n\\end{figure}\\n")}
+                      className="p-2 hover:bg-gray-100 rounded transition-colors"
+                      title="Insert image"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                      </svg>
+                    </button>
+                    <button
+                      onClick={() => insertLatexCommand("\\begin{equation}\\n\\n\\end{equation}")}
+                      className="p-2 hover:bg-gray-100 rounded transition-colors"
+                      title="Equation"
+                    >
+                      <span className="text-sm font-mono">Σ</span>
+                    </button>
+                    <div className="w-px h-6 bg-gray-300 mx-1"></div>
+                    <button
+                      onClick={() => setShowToolbar(false)}
+                      className="p-2 hover:bg-gray-100 rounded transition-colors"
+                      title="Hide toolbar"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+                
+                {/* Show toolbar button when hidden */}
+                {!showToolbar && (
+                  <button
+                    onClick={() => setShowToolbar(true)}
+                    className="absolute bottom-6 left-1/2 transform -translate-x-1/2 bg-white shadow-lg rounded-lg border border-gray-200 px-3 py-2 text-sm hover:bg-gray-50 transition-colors z-10"
+                  >
+                    Show Toolbar
+                  </button>
+                )}
+              </>
+            ) : (
+              <div className="h-full overflow-auto bg-gray-900 text-gray-100 p-4 font-mono text-sm">
+                {errorLog ? (
+                  <pre className="whitespace-pre-wrap">{errorLog}</pre>
+                ) : (
+                  <div className="text-center text-gray-500 mt-8">
+                    <CheckCircle className="w-12 h-12 mx-auto mb-3 text-green-500" />
+                    <p>No errors. Compilation log will appear here.</p>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
         )}
@@ -720,17 +999,18 @@ export default function Editor() {
 
             <div className="mb-6">
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                File Name
+                File Name (with path)
               </label>
               <input
                 type="text"
                 value={newFileName}
                 onChange={(e) => setNewFileName(e.target.value)}
                 onKeyPress={(e) => e.key === "Enter" && createFile()}
-                placeholder="example.tex"
+                placeholder="example.tex or folder/file.tex"
                 className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
                 autoFocus
               />
+              <p className="text-xs text-gray-500 mt-1">Tip: Use folder/file.tex to create files in folders</p>
             </div>
 
             <div className="flex gap-3">
@@ -746,6 +1026,50 @@ export default function Editor() {
               <button
                 onClick={createFile}
                 disabled={!newFileName.trim()}
+                className="flex-1 px-4 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
+              >
+                Create
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ================= NEW FOLDER MODAL ================= */}
+      {showNewFolderModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
+            <h2 className="text-2xl font-bold text-gray-800 mb-4">New Folder</h2>
+
+            <div className="mb-6">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Folder Name
+              </label>
+              <input
+                type="text"
+                value={newFolderName}
+                onChange={(e) => setNewFolderName(e.target.value)}
+                onKeyPress={(e) => e.key === "Enter" && createFolder()}
+                placeholder="images or sections/intro"
+                className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+                autoFocus
+              />
+              <p className="text-xs text-gray-500 mt-1">Create folders to organize your project files</p>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  setShowNewFolderModal(false);
+                  setNewFolderName("");
+                }}
+                className="flex-1 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={createFolder}
+                disabled={!newFolderName.trim()}
                 className="flex-1 px-4 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
               >
                 Create
