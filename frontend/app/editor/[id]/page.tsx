@@ -14,6 +14,12 @@ import {
   ChevronRight,
   Share2,
   ArrowLeft,
+  ZoomIn,
+  ZoomOut,
+  Maximize2,
+  Columns,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import axios from "axios";
@@ -126,6 +132,12 @@ export default function Editor() {
   const [shareEmail, setShareEmail] = useState("");
   const [shareLevel, setShareLevel] = useState("editor");
   const [collaborators, setCollaborators] = useState<any[]>([]);
+  
+  // PDF Preview
+  const [pdfUrl, setPdfUrl] = useState<string>("");
+  const [showPdf, setShowPdf] = useState(true);
+  const [pdfZoom, setPdfZoom] = useState(100);
+  const [viewMode, setViewMode] = useState<"split" | "editor" | "pdf">("split");
 
   /**
    * ==============================
@@ -135,6 +147,19 @@ export default function Editor() {
   useEffect(() => {
     checkAuthAndLoad();
   }, [id]);
+
+  // Ctrl+S handler
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        handleSaveAndCompile();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [code]);
 
   const checkAuthAndLoad = async () => {
     const user = await authService.getMe();
@@ -296,6 +321,22 @@ export default function Editor() {
    * 5. COMPILE & DOWNLOAD
    * ==============================
    */
+  const handleSaveAndCompile = async () => {
+    // Save current file
+    try {
+      await axios.put(
+        `${API_URL}/projects/${id}/files/${currentFile}`,
+        { content: code },
+        { headers: { "Content-Type": "application/json", ...authService.getAuthHeaders() } }
+      );
+    } catch (error) {
+      console.error("Save failed:", error);
+    }
+    
+    // Trigger compile
+    await handleCompile();
+  };
+
   const handleCompile = async () => {
     setCompiling(true);
     setCompileStatus("idle");
@@ -316,6 +357,8 @@ export default function Editor() {
           clearInterval(interval);
           setCompiling(false);
           setCompileStatus("success");
+          // Refresh PDF preview
+          refreshPdfPreview();
         }
 
         if (statusRes.data.status === "error") {
@@ -348,6 +391,28 @@ export default function Editor() {
       link.remove();
     } catch (error: any) {
       alert(error.response?.data?.detail || "Please compile the document first");
+    }
+  };
+
+  const refreshPdfPreview = async () => {
+    try {
+      const res = await axios.get(`${API_URL}/projects/${id}/download`, {
+        headers: authService.getAuthHeaders(),
+        responseType: "blob",
+      });
+
+      // Create blob URL from the response
+      const blob = new Blob([res.data], { type: "application/pdf" });
+      const url = window.URL.createObjectURL(blob);
+      
+      // Revoke old URL if exists
+      if (pdfUrl) {
+        window.URL.revokeObjectURL(pdfUrl);
+      }
+      
+      setPdfUrl(url);
+    } catch (error) {
+      console.error("Failed to load PDF preview:", error);
     }
   };
 
@@ -431,6 +496,31 @@ export default function Editor() {
               </span>
             </div>
 
+            {/* View Mode Selector */}
+            <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
+              <button
+                onClick={() => setViewMode("editor")}
+                className={`p-2 rounded transition-colors ${viewMode === "editor" ? "bg-white shadow" : "hover:bg-gray-200"}`}
+                title="Editor only"
+              >
+                <File className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setViewMode("split")}
+                className={`p-2 rounded transition-colors ${viewMode === "split" ? "bg-white shadow" : "hover:bg-gray-200"}`}
+                title="Split view"
+              >
+                <Columns className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setViewMode("pdf")}
+                className={`p-2 rounded transition-colors ${viewMode === "pdf" ? "bg-white shadow" : "hover:bg-gray-200"}`}
+                title="PDF only"
+              >
+                <FileText className="w-4 h-4" />
+              </button>
+            </div>
+
             {/* Download */}
             <button
               onClick={handleDownload}
@@ -445,6 +535,7 @@ export default function Editor() {
               onClick={handleCompile}
               disabled={compiling}
               className="flex items-center gap-2 px-5 py-2 bg-green-600 text-white rounded-lg disabled:opacity-60 hover:bg-green-700 transition-colors"
+              title="Ctrl+S to save and compile"
             >
               <Play className="w-4 h-4" />
               {compiling ? "Compiling..." : "Recompile"}
@@ -479,48 +570,54 @@ export default function Editor() {
       {/* ================= MAIN ================= */}
       <div className="flex flex-1 overflow-hidden">
         {/* ===== FILE SIDEBAR ===== */}
+        {viewMode !== "pdf" && (
         <div className="w-64 bg-white border-r flex flex-col">
-          <div className="px-4 py-3 border-b flex justify-between items-center">
-            <span className="text-sm font-semibold text-gray-700">Files</span>
-            <button
-              onClick={() => setShowNewFileModal(true)}
-              className="p-1.5 hover:bg-gray-100 rounded transition-colors"
-              title="New file"
-            >
-              <Plus className="w-4 h-4" />
-            </button>
+          <div className="px-4 py-3 border-b">
+            <div className="flex justify-between items-center mb-2">
+              <span className="text-sm font-semibold text-gray-700">Files</span>
+              <button
+                onClick={() => setShowNewFileModal(true)}
+                className="p-1.5 hover:bg-gray-100 rounded transition-colors"
+                title="New file"
+              >
+                <Plus className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-xs text-gray-500">
+              Set one file as <span className="font-semibold">MAIN</span> to compile. Use <code className="bg-gray-100 px-1 rounded">\input{"{filename}"}</code> to include others.
+            </p>
           </div>
 
           <div className="flex-1 overflow-y-auto">
             {files.map((file) => (
               <div
                 key={file.name}
-                className={`flex items-center justify-between px-4 py-2.5 cursor-pointer hover:bg-gray-50 transition-colors ${
+                className={`group flex items-center justify-between px-4 py-2.5 cursor-pointer hover:bg-gray-50 transition-colors ${
                   currentFile === file.name ? "bg-green-50 border-l-4 border-green-600" : ""
                 }`}
                 onClick={() => switchFile(file.name)}
               >
-                <div className="flex items-center gap-2 flex-1">
-                  <File className="w-4 h-4 text-gray-500" />
-                  <span className="text-sm text-gray-700">{file.name}</span>
+                <div className="flex items-center gap-2 flex-1 min-w-0">
+                  <File className="w-4 h-4 text-gray-500 flex-shrink-0" />
+                  <span className="text-sm text-gray-700 truncate">{file.name}</span>
                   {file.is_main && (
-                    <span className="text-xs bg-green-100 text-green-700 px-1.5 py-0.5 rounded">
-                      main
+                    <span className="text-xs bg-green-600 text-white px-2 py-0.5 rounded font-medium flex-shrink-0">
+                      MAIN
                     </span>
                   )}
                 </div>
                 
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                   {!file.is_main && (
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
                         setMainFile(file.name);
                       }}
-                      className="p-1 hover:bg-gray-200 rounded text-xs text-gray-600"
-                      title="Set as main"
+                      className="px-2 py-1 text-xs bg-green-100 hover:bg-green-200 text-green-700 rounded transition-colors font-medium"
+                      title="Set as main compilation file"
                     >
-                      <ChevronRight className="w-3 h-3" />
+                      Set Main
                     </button>
                   )}
                   {files.length > 1 && (
@@ -530,7 +627,7 @@ export default function Editor() {
                         deleteFile(file.name);
                       }}
                       className="p-1 hover:bg-red-100 rounded"
-                      title="Delete"
+                      title="Delete file"
                     >
                       <X className="w-3 h-3 text-red-600" />
                     </button>
@@ -540,11 +637,14 @@ export default function Editor() {
             ))}
           </div>
         </div>
+        )}
 
         {/* ===== CODE EDITOR ===== */}
-        <div className="flex-1 bg-white flex flex-col">
-          <div className="px-4 py-2 border-b text-sm font-semibold bg-gray-50">
-            {currentFile}
+        {viewMode !== "pdf" && (
+        <div className={`bg-white flex flex-col ${viewMode === "split" ? "flex-1" : "w-full"}`}>
+          <div className="px-4 py-2 border-b text-sm font-semibold bg-gray-50 flex justify-between items-center">
+            <span>{currentFile}</span>
+            <span className="text-xs text-gray-500">Press Ctrl+S to save and compile</span>
           </div>
 
           <div className="flex-1 overflow-hidden">
@@ -560,6 +660,56 @@ export default function Editor() {
             />
           </div>
         </div>
+        )}
+
+        {/* ===== PDF PREVIEW ===== */}
+        {viewMode !== "editor" && (
+        <div className={`bg-gray-100 flex flex-col ${viewMode === "split" ? "flex-1" : "w-full"}`}>
+          <div className="px-4 py-2 border-b bg-gray-50 flex justify-between items-center">
+            <span className="text-sm font-semibold">PDF Preview</span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setPdfZoom(Math.max(50, pdfZoom - 10))}
+                className="p-1.5 hover:bg-gray-200 rounded"
+                title="Zoom out"
+              >
+                <ZoomOut className="w-4 h-4" />
+              </button>
+              <span className="text-xs text-gray-600 min-w-[50px] text-center">{pdfZoom}%</span>
+              <button
+                onClick={() => setPdfZoom(Math.min(200, pdfZoom + 10))}
+                className="p-1.5 hover:bg-gray-200 rounded"
+                title="Zoom in"
+              >
+                <ZoomIn className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setPdfZoom(100)}
+                className="px-2 py-1 text-xs hover:bg-gray-200 rounded"
+              >
+                Reset
+              </button>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-auto p-4 bg-gray-200">
+            {pdfUrl ? (
+              <iframe
+                src={pdfUrl}
+                className="w-full h-full bg-white shadow-lg"
+                style={{ transform: `scale(${pdfZoom / 100})`, transformOrigin: 'top left' }}
+                title="PDF Preview"
+              />
+            ) : (
+              <div className="flex flex-col items-center justify-center h-full text-gray-500">
+                <FileText className="w-16 h-16 mb-4 text-gray-400" />
+                <p className="text-lg font-medium mb-2">No PDF generated yet</p>
+                <p className="text-sm">Click Recompile or press Ctrl+S to generate PDF</p>
+              </div>
+            )}
+          </div>
+        </div>
+        )}
       </div>
 
       {/* ================= NEW FILE MODAL ================= */}

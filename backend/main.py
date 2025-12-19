@@ -55,6 +55,11 @@ async def require_auth(user: Optional[User] = Depends(get_current_user)) -> User
         raise HTTPException(status_code=401, detail="Not authenticated")
     return user
 
+async def require_admin(user: User = Depends(require_auth)) -> User:
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
 async def check_project_access(project_id: str, user: User, required_level: AccessLevel = AccessLevel.VIEWER) -> Project:
     project = await Project.get(project_id)
     if not project:
@@ -92,11 +97,16 @@ async def register(user_data: UserCreate):
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
     
+    # Check if this is the first user (make them admin)
+    user_count = await User.count()
+    is_first_user = user_count == 0
+    
     # Create user
     user = User(
         email=user_data.email,
         password_hash=hash_password(user_data.password),
-        name=user_data.name
+        name=user_data.name,
+        is_admin=is_first_user
     )
     await user.insert()
     
@@ -105,7 +115,7 @@ async def register(user_data: UserCreate):
     
     return {
         "token": token,
-        "user": UserResponse(id=str(user.id), email=user.email, name=user.name)
+        "user": UserResponse(id=str(user.id), email=user.email, name=user.name, is_admin=user.is_admin)
     }
 
 @app.post("/auth/login")
@@ -118,12 +128,12 @@ async def login(credentials: UserLogin):
     
     return {
         "token": token,
-        "user": UserResponse(id=str(user.id), email=user.email, name=user.name)
+        "user": UserResponse(id=str(user.id), email=user.email, name=user.name, is_admin=user.is_admin)
     }
 
 @app.get("/auth/me")
 async def get_me(user: User = Depends(require_auth)):
-    return UserResponse(id=str(user.id), email=user.email, name=user.name)
+    return UserResponse(id=str(user.id), email=user.email, name=user.name, is_admin=user.is_admin)
 
 @app.post("/auth/logout")
 async def logout(authorization: Optional[str] = Header(None)):
@@ -299,10 +309,16 @@ async def trigger_compile(id: str, user: User = Depends(require_auth)):
     
     # Find main file
     main_file = next((f for f in project.files if f.is_main), None)
-    if not main_file:
-        raise HTTPException(status_code=400, detail="No main file specified")
     
-    # Send all files to worker
+    # If no main file, set the first .tex file as main
+    if not main_file:
+        if not project.files:
+            raise HTTPException(status_code=400, detail="No files in project")
+        project.files[0].is_main = True
+        await project.save()
+        main_file = project.files[0]
+    
+    # Send all files to worker (supports \input{} and \include{})
     files_dict = {f.name: f.content for f in project.files}
     task = compile_latex_task.delay(str(project.id), files_dict, main_file.name)
     return {"task_id": task.id}
@@ -375,3 +391,192 @@ async def websocket_endpoint(websocket: WebSocket, project_id: str, filename: st
             await manager.broadcast(data, f"{project_id}:{filename}", websocket)
     except WebSocketDisconnect:
         manager.disconnect(websocket, f"{project_id}:{filename}")
+
+# --- ADMIN ENDPOINTS ---
+
+@app.get("/admin/users")
+async def get_all_users(admin: User = Depends(require_admin)):
+    users = await User.find_all().to_list()
+    return [UserResponse(id=str(u.id), email=u.email, name=u.name, is_admin=u.is_admin) for u in users]
+
+@app.delete("/admin/users/{user_id}")
+async def delete_user(user_id: str, admin: User = Depends(require_admin)):
+    user = await User.get(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if user.is_admin and str(user.id) == str(admin.id):
+        raise HTTPException(status_code=400, detail="Cannot delete yourself as admin")
+    
+    # Delete user's projects
+    projects = await Project.find(Project.owner_id == user_id).to_list()
+    for project in projects:
+        await project.delete()
+    
+    await user.delete()
+    return {"message": "User deleted"}
+
+@app.put("/admin/users/{user_id}/toggle-admin")
+async def toggle_admin(user_id: str, admin: User = Depends(require_admin)):
+    user = await User.get(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    user.is_admin = not user.is_admin
+    await user.save()
+    return UserResponse(id=str(user.id), email=user.email, name=user.name, is_admin=user.is_admin)
+
+@app.get("/admin/projects")
+async def get_all_projects(admin: User = Depends(require_admin)):
+    projects = await Project.find_all().to_list()
+    return projects
+
+@app.get("/admin/stats")
+async def get_stats(admin: User = Depends(require_admin)):
+    total_users = await User.count()
+    total_projects = await Project.count()
+    
+    # Get recent activity
+    recent_projects = await Project.find_all().sort("-updated_at").limit(10).to_list()
+    
+    return {
+        "total_users": total_users,
+        "total_projects": total_projects,
+        "recent_projects": recent_projects
+    }
+
+@app.get("/admin/backup")
+async def download_backup(admin: User = Depends(require_admin)):
+    import zipfile
+    import io
+    import json
+    
+    # Create in-memory zip file
+    zip_buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        # Export all users
+        users = await User.find_all().to_list()
+        users_data = [{
+            "id": str(u.id),
+            "email": u.email,
+            "name": u.name,
+            "password_hash": u.password_hash,
+            "is_admin": u.is_admin,
+            "created_at": u.created_at.isoformat()
+        } for u in users]
+        zip_file.writestr("users.json", json.dumps(users_data, indent=2))
+        
+        # Export all projects
+        projects = await Project.find_all().to_list()
+        projects_data = []
+        
+        for p in projects:
+            project_data = {
+                "id": str(p.id),
+                "name": p.name,
+                "owner_id": p.owner_id,
+                "created_at": p.created_at.isoformat(),
+                "updated_at": p.updated_at.isoformat(),
+                "files": [{
+                    "name": f.name,
+                    "content": f.content,
+                    "is_main": f.is_main,
+                    "created_at": f.created_at.isoformat(),
+                    "updated_at": f.updated_at.isoformat()
+                } for f in p.files],
+                "access_list": [{
+                    "user_id": a.user_id,
+                    "access_level": a.access_level,
+                    "granted_at": a.granted_at.isoformat()
+                } for a in p.access_list]
+            }
+            projects_data.append(project_data)
+            
+            # Also save project files individually
+            for file in p.files:
+                zip_file.writestr(f"projects/{p.name}_{str(p.id)}/{file.name}", file.content)
+        
+        zip_file.writestr("projects.json", json.dumps(projects_data, indent=2))
+    
+    zip_buffer.seek(0)
+    
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        iter([zip_buffer.getvalue()]),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=grleaf_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"}
+    )
+
+@app.post("/admin/restore")
+async def restore_backup(file: bytes = None, admin: User = Depends(require_admin)):
+    if not file:
+        raise HTTPException(status_code=400, detail="No file provided")
+    
+    import zipfile
+    import io
+    import json
+    from bson import ObjectId
+    
+    try:
+        zip_buffer = io.BytesIO(file)
+        
+        with zipfile.ZipFile(zip_buffer, 'r') as zip_file:
+            # Restore users
+            if 'users.json' in zip_file.namelist():
+                users_json = zip_file.read('users.json').decode('utf-8')
+                users_data = json.loads(users_json)
+                
+                for user_data in users_data:
+                    # Check if user already exists
+                    existing = await User.find_one(User.email == user_data['email'])
+                    if not existing:
+                        user = User(
+                            email=user_data['email'],
+                            name=user_data.get('name', ''),
+                            password_hash=user_data['password_hash'],
+                            is_admin=user_data.get('is_admin', False),
+                            created_at=datetime.fromisoformat(user_data['created_at'])
+                        )
+                        await user.insert()
+            
+            # Restore projects
+            if 'projects.json' in zip_file.namelist():
+                projects_json = zip_file.read('projects.json').decode('utf-8')
+                projects_data = json.loads(projects_json)
+                
+                for project_data in projects_data:
+                    # Check if project already exists
+                    try:
+                        existing = await Project.get(project_data['id'])
+                        if existing:
+                            continue  # Skip existing projects
+                    except:
+                        pass
+                    
+                    # Create project
+                    from models import FileItem, ProjectAccess
+                    project = Project(
+                        name=project_data['name'],
+                        owner_id=project_data['owner_id'],
+                        created_at=datetime.fromisoformat(project_data['created_at']),
+                        updated_at=datetime.fromisoformat(project_data['updated_at']),
+                        files=[FileItem(
+                            name=f['name'],
+                            content=f['content'],
+                            is_main=f['is_main'],
+                            created_at=datetime.fromisoformat(f['created_at']),
+                            updated_at=datetime.fromisoformat(f['updated_at'])
+                        ) for f in project_data['files']],
+                        access_list=[ProjectAccess(
+                            user_id=a['user_id'],
+                            access_level=a['access_level'],
+                            granted_at=datetime.fromisoformat(a['granted_at'])
+                        ) for a in project_data['access_list']]
+                    )
+                    await project.insert()
+        
+        return {"message": "Backup restored successfully"}
+    
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to restore backup: {str(e)}")

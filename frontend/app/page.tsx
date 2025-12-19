@@ -148,6 +148,16 @@ export default function Dashboard() {
             </div>
             
             <div className="flex items-center gap-3">
+              {user?.is_admin && (
+                <button
+                  onClick={() => router.push("/admin")}
+                  className="flex items-center gap-2 px-4 py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-all font-medium"
+                  title="Admin Dashboard"
+                >
+                  <Users className="w-5 h-5" />
+                  Admin
+                </button>
+              )}
               <button 
                 onClick={() => setShowCreateModal(true)}
                 className="flex items-center gap-2 px-5 py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-all shadow-sm hover:shadow font-medium"

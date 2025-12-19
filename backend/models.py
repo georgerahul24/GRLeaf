@@ -44,6 +44,7 @@ class User(Document):
     email: str
     password_hash: str
     name: str = ""
+    is_admin: bool = False
     created_at: datetime = Field(default_factory=datetime.now)
     
     class Settings:
@@ -63,6 +64,7 @@ class UserResponse(BaseModel):
     id: str
     email: str
     name: str
+    is_admin: bool = False
 
 class ProjectCreate(BaseModel):
     name: str
