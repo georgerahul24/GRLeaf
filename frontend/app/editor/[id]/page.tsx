@@ -28,6 +28,7 @@ import CodeMirror from "@uiw/react-codemirror";
 import { StreamLanguage } from "@codemirror/language";
 import { stex } from "@codemirror/legacy-modes/mode/stex";
 import { autocompletion } from "@codemirror/autocomplete";
+import { EditorView } from "@codemirror/view";
 import { authService } from "@/lib/auth";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -143,6 +144,13 @@ export default function Editor() {
   const [showNewFolderModal, setShowNewFolderModal] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   const [showToolbar, setShowToolbar] = useState(true);
+  const [showImageUploadModal, setShowImageUploadModal] = useState(false);
+  const [imageCaption, setImageCaption] = useState("");
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imageWidth, setImageWidth] = useState("0.8");
+  const [imageFolder, setImageFolder] = useState("images");
+  const [editorView, setEditorView] = useState<EditorView | null>(null);
+  const [cursorPos, setCursorPos] = useState(0);
   const [newFileName, setNewFileName] = useState("");
   const [showShareModal, setShowShareModal] = useState(false);
   const [shareEmail, setShareEmail] = useState("");
@@ -384,7 +392,111 @@ export default function Editor() {
   };
 
   const insertLatexCommand = (command: string) => {
-    setCode(code + command);
+    if (editorView) {
+      const pos = editorView.state.selection.main.head;
+      const transaction = editorView.state.update({
+        changes: { from: pos, insert: command }
+      });
+      editorView.dispatch(transaction);
+      editorView.focus();
+    } else {
+      // Fallback: insert at cursor position in code string
+      const newCode = code.slice(0, cursorPos) + command + code.slice(cursorPos);
+      setCode(newCode);
+    }
+  };
+
+  const handleImageUpload = async () => {
+    if (!imageFile) return;
+    
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      const base64 = event.target?.result as string;
+      const folderPath = imageFolder.trim() ? imageFolder.trim() + '/' : '';
+      const filename = `${folderPath}${imageFile.name}`;
+      
+      try {
+        // Create the image file in the project
+        await axios.post(
+          `${API_URL}/projects/${id}/files`,
+          { name: filename, content: base64 },
+          { headers: { "Content-Type": "application/json", ...authService.getAuthHeaders() } }
+        );
+        
+        // Insert LaTeX code for the image at cursor position
+        const imageCode = `\n\\begin{figure}[h]\n\\centering\n\\includegraphics[width=${imageWidth}\\textwidth]{${filename}}\n\\caption{${imageCaption}}\n\\end{figure}\n`;
+        insertLatexCommand(imageCode);
+        
+        await loadProject();
+        
+        // Reset modal
+        setShowImageUploadModal(false);
+        setImageFile(null);
+        setImageCaption("");
+        setImageWidth("0.8");
+        setImageFolder("images");
+      } catch (error: any) {
+        alert(error.response?.data?.detail || "Failed to upload image");
+      }
+    };
+    reader.readAsDataURL(imageFile);
+  };
+
+  const handleSidebarFileDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    const droppedFiles = Array.from(e.dataTransfer.files);
+    
+    for (const droppedFile of droppedFiles) {
+      const reader = new FileReader();
+      
+      if (droppedFile.type.startsWith('image/')) {
+        // Handle image files
+        reader.onload = async (event) => {
+          const base64 = event.target?.result as string;
+          const filename = `images/${droppedFile.name}`; // Default to images for sidebar drop
+          
+          try {
+            await axios.post(
+              `${API_URL}/projects/${id}/files`,
+              { name: filename, content: base64 },
+              { headers: { "Content-Type": "application/json", ...authService.getAuthHeaders() } }
+            );
+            
+            // Insert with width 1.0
+            const imageCode = `\n\\begin{figure}[h]\n\\centering\n\\includegraphics[width=1.0\\textwidth]{${filename}}\n\\caption{${droppedFile.name}}\n\\end{figure}\n`;
+            insertLatexCommand(imageCode);
+            
+            await loadProject();
+          } catch (error) {
+            console.error("Failed to upload image:", error);
+          }
+        };
+        reader.readAsDataURL(droppedFile);
+      } else if (droppedFile.name.endsWith('.tex') || droppedFile.type === 'text/plain') {
+        // Handle text/LaTeX files
+        reader.onload = async (event) => {
+          const content = event.target?.result as string;
+          const filename = droppedFile.name;
+          
+          try {
+            await axios.post(
+              `${API_URL}/projects/${id}/files`,
+              { name: filename, content: content },
+              { headers: { "Content-Type": "application/json", ...authService.getAuthHeaders() } }
+            );
+            
+            // Insert \input{} command
+            const inputCode = `\\input{${filename.replace('.tex', '')}}`;
+            insertLatexCommand(inputCode);
+            
+            await loadProject();
+          } catch (error) {
+            console.error("Failed to upload file:", error);
+          }
+        };
+        reader.readAsText(droppedFile);
+      }
+    }
   };
 
   /**
@@ -541,7 +653,14 @@ export default function Editor() {
   }
 
   return (
-    <div className="flex h-screen flex-col bg-gray-50">
+    <div 
+      className="flex h-screen flex-col bg-gray-50"
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => {
+        e.preventDefault();
+        handleSidebarFileDrop(e);
+      }}
+    >
       {/* ================= HEADER ================= */}
       <header className="bg-white border-b shadow-sm">
         <div className="px-6 py-3 flex justify-between items-center">
@@ -667,7 +786,11 @@ export default function Editor() {
             </p>
           </div>
 
-          <div className="flex-1 overflow-y-auto">
+          <div 
+            className="flex-1 overflow-y-auto"
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={handleSidebarFileDrop}
+          >
             {(() => {
               // Group files by folder
               const fileTree: any = {};
@@ -838,9 +961,18 @@ export default function Editor() {
                   extensions={[
                     StreamLanguage.define(stex),
                     autocompletion({ override: [(ctx) => latexCompletions(ctx, files)] }),
+                    EditorView.lineWrapping,
                   ]}
                   onChange={onChange}
                   onDrop={handleImageDrop}
+                  onCreateEditor={(view) => {
+                    setEditorView(view);
+                  }}
+                  onUpdate={(viewUpdate) => {
+                    if (viewUpdate.selectionSet) {
+                      setCursorPos(viewUpdate.state.selection.main.head);
+                    }
+                  }}
                   className="h-full text-base"
                 />
                 
@@ -870,7 +1002,7 @@ export default function Editor() {
                     </button>
                     <div className="w-px h-6 bg-gray-300 mx-1"></div>
                     <button
-                      onClick={() => insertLatexCommand("\\begin{itemize}\\n\\item \\n\\end{itemize}")}
+                      onClick={() => insertLatexCommand("\\begin{itemize}\n\\item \n\\end{itemize}")}
                       className="p-2 hover:bg-gray-100 rounded transition-colors"
                       title="Bullet list"
                     >
@@ -879,7 +1011,7 @@ export default function Editor() {
                       </svg>
                     </button>
                     <button
-                      onClick={() => insertLatexCommand("\\begin{enumerate}\\n\\item \\n\\end{enumerate}")}
+                      onClick={() => insertLatexCommand("\\begin{enumerate}\n\\item \n\\end{enumerate}")}
                       className="p-2 hover:bg-gray-100 rounded transition-colors"
                       title="Numbered list"
                     >
@@ -889,16 +1021,25 @@ export default function Editor() {
                     </button>
                     <div className="w-px h-6 bg-gray-300 mx-1"></div>
                     <button
-                      onClick={() => insertLatexCommand("\\begin{figure}[h]\\n\\centering\\n\\includegraphics[width=0.8\\textwidth]{}\\n\\caption{}\\n\\end{figure}\\n")}
+                      onClick={() => setShowImageUploadModal(true)}
                       className="p-2 hover:bg-gray-100 rounded transition-colors"
-                      title="Insert image"
+                      title="Upload image"
                     >
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
                       </svg>
                     </button>
                     <button
-                      onClick={() => insertLatexCommand("\\begin{equation}\\n\\n\\end{equation}")}
+                      onClick={() => insertLatexCommand("\\begin{figure}[h]\n\\centering\n\\includegraphics[width=0.8\\textwidth]{path/to/image.jpg}\n\\caption{Your caption}\n\\label{fig:label}\n\\end{figure}")}
+                      className="p-2 hover:bg-gray-100 rounded transition-colors"
+                      title="Insert image template"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                      </svg>
+                    </button>
+                    <button
+                      onClick={() => insertLatexCommand("\\begin{equation}\n\n\\end{equation}")}
                       className="p-2 hover:bg-gray-100 rounded transition-colors"
                       title="Equation"
                     >
@@ -1073,6 +1214,96 @@ export default function Editor() {
                 className="flex-1 px-4 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
               >
                 Create
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ================= IMAGE UPLOAD MODAL ================= */}
+      {showImageUploadModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
+            <h2 className="text-2xl font-bold text-gray-800 mb-4">Upload Image</h2>
+
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Choose Image File
+              </label>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => setImageFile(e.target.files?.[0] || null)}
+                className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+              />
+              {imageFile && (
+                <p className="text-xs text-green-600 mt-1">Selected: {imageFile.name}</p>
+              )}
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Folder Path
+              </label>
+              <input
+                type="text"
+                value={imageFolder}
+                onChange={(e) => setImageFolder(e.target.value)}
+                placeholder="images or figures or leave empty for root"
+                className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+              />
+              <p className="text-xs text-gray-500 mt-1">File will be saved as: {imageFolder.trim() ? imageFolder.trim() + '/' : ''}{imageFile?.name || 'filename.jpg'}</p>
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Caption
+              </label>
+              <input
+                type="text"
+                value={imageCaption}
+                onChange={(e) => setImageCaption(e.target.value)}
+                placeholder="Enter image caption"
+                className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+              />
+            </div>
+
+            <div className="mb-6">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Width (0 to 1, relative to text width)
+              </label>
+              <input
+                type="number"
+                min="0"
+                max="1"
+                step="0.1"
+                value={imageWidth}
+                onChange={(e) => setImageWidth(e.target.value)}
+                placeholder="0.8"
+                className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+              />
+              <p className="text-xs text-gray-500 mt-1">Example: 0.8 for 80% width, 1.0 for 100% width</p>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  setShowImageUploadModal(false);
+                  setImageFile(null);
+                  setImageCaption("");
+                  setImageWidth("0.8");
+                  setImageFolder("images");
+                }}
+                className="flex-1 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleImageUpload}
+                disabled={!imageFile}
+                className="flex-1 px-4 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
+              >
+                Upload & Insert
               </button>
             </div>
           </div>

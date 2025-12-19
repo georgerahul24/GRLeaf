@@ -26,6 +26,8 @@ def compile_latex_task(project_id, files_dict, main_file):
     # 2. Write all LaTeX files
     for filename, content in files_dict.items():
         file_path = os.path.join(build_dir, filename)
+        # Create subdirectories if needed (e.g., images/)
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
 
