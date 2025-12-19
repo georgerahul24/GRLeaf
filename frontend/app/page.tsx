@@ -1,23 +1,42 @@
 "use client";
 import { useState, useEffect } from "react";
-import { FileText, Plus, Search, Grid, List, Clock, Users, Trash2, Star, FolderOpen } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { FileText, Plus, Search, Grid, List, Clock, Users, Trash2, Star, FolderOpen, LogOut } from "lucide-react";
+import { authService } from "@/lib/auth";
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export default function Dashboard() {
+  const router = useRouter();
   const [projects, setProjects] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [viewMode, setViewMode] = useState("grid");
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
   const [loading, setLoading] = useState(true);
+  const [user, setUser] = useState(null);
 
   useEffect(() => {
-    fetchProjects();
+    checkAuth();
   }, []);
+
+  const checkAuth = async () => {
+    const currentUser = await authService.getMe();
+    if (!currentUser) {
+      router.push("/login");
+      return;
+    }
+    setUser(currentUser);
+    fetchProjects();
+  };
 
   const fetchProjects = async () => {
     try {
       setLoading(true);
-      const res = await fetch("http://localhost:8000/projects");
+      const res = await fetch(`${API_URL}/projects`, {
+        headers: authService.getAuthHeaders(),
+      });
+      if (!res.ok) throw new Error("Failed to fetch");
       const data = await res.json();
       setProjects(data);
     } catch (error) {
@@ -25,6 +44,11 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleLogout = async () => {
+    await authService.logout();
+    router.push("/login");
   };
 
   const filteredProjects = projects.filter(p => 
@@ -35,13 +59,19 @@ export default function Dashboard() {
     if (!newProjectName.trim()) return;
     
     try {
-      const res = await fetch(`http://localhost:8000/projects?name=${encodeURIComponent(newProjectName)}`, {
-        method: "POST"
+      const res = await fetch(`${API_URL}/projects`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...authService.getAuthHeaders(),
+        },
+        body: JSON.stringify({ name: newProjectName }),
       });
+      if (!res.ok) throw new Error("Failed to create");
       const data = await res.json();
       
       // Navigate to editor
-      window.location.href = `/editor/${data.id}`;
+      router.push(`/editor/${data.id}`);
     } catch (error) {
       console.error("Error creating project:", error);
       alert("Failed to create project");
@@ -60,9 +90,11 @@ export default function Dashboard() {
     if (!confirm("Are you sure you want to delete this project?")) return;
     
     try {
-      await fetch(`http://localhost:8000/projects/${id}`, {
-        method: "DELETE"
+      const res = await fetch(`${API_URL}/projects/${id}`, {
+        method: "DELETE",
+        headers: authService.getAuthHeaders(),
       });
+      if (!res.ok) throw new Error("Failed to delete");
       setProjects(projects.filter(p => p._id !== id));
     } catch (error) {
       console.error("Error deleting project:", error);
@@ -83,7 +115,7 @@ export default function Dashboard() {
   };
 
   const openProject = (id) => {
-    window.location.href = `/editor/${id}`;
+    router.push(`/editor/${id}`);
   };
 
   if (loading) {
@@ -108,18 +140,29 @@ export default function Dashboard() {
                 <FileText className="w-6 h-6 text-white" />
               </div>
               <div>
-                <h1 className="text-2xl font-bold text-gray-800">LaTeX Editor</h1>
-                <p className="text-sm text-gray-500">Collaborative document editing</p>
+                <h1 className="text-2xl font-bold text-gray-800">GRLeaf</h1>
+                <p className="text-sm text-gray-500">
+                  {user ? `Welcome, ${user.name || user.email}` : "Collaborative LaTeX editing"}
+                </p>
               </div>
             </div>
             
-            <button 
-              onClick={() => setShowCreateModal(true)}
-              className="flex items-center gap-2 px-5 py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-all shadow-sm hover:shadow font-medium"
-            >
-              <Plus className="w-5 h-5" />
-              New Project
-            </button>
+            <div className="flex items-center gap-3">
+              <button 
+                onClick={() => setShowCreateModal(true)}
+                className="flex items-center gap-2 px-5 py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-all shadow-sm hover:shadow font-medium"
+              >
+                <Plus className="w-5 h-5" />
+                New Project
+              </button>
+              <button
+                onClick={handleLogout}
+                className="flex items-center gap-2 px-4 py-2.5 border border-gray-300 hover:bg-gray-50 text-gray-700 rounded-lg transition-all font-medium"
+              >
+                <LogOut className="w-5 h-5" />
+                Logout
+              </button>
+            </div>
           </div>
         </div>
       </header>
